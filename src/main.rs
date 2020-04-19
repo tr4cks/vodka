@@ -13,5 +13,11 @@ fn main() {
             "{:x} {:x} {:x}",
             info.lpBaseOfDll as usize, info.SizeOfImage, info.EntryPoint as usize
         );
+        if let Ok(addr) = module.proc_address("LoadLibraryA") {
+            println!(
+                "This module contains a function named LoadLibraryA at {:x}",
+                addr as usize
+            );
+        }
     }
 }
