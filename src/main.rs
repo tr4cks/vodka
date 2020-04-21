@@ -1,8 +1,15 @@
+use tempfile::tempdir;
+
+mod asset;
 mod system;
 
 use system::Process;
 
 fn main() {
+    let dir = tempdir().unwrap();
+    // TODO: I think I can do it better -> <P: AsRef<Path>>
+    asset::unzip_python_library(dir.as_ref());
+
     let process = Process::current().unwrap();
     println!("Filename: {}", process.filename().unwrap());
     for module in process.modules().unwrap() {
