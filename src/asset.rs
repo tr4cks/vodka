@@ -11,7 +11,7 @@ const ASSET_PYTHON_ZIP: &'static [u8] =
 // TODO: Replace all unwrap() to replace it with Result.
 //       This function may return zip::ZipError or std::error::Error errors.
 //       Generic error without an enum?
-pub fn unzip_python_library(path: &Path) {
+pub fn unzip_python_library(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         // TODO: return error if path does not exists.
     }
@@ -20,23 +20,24 @@ pub fn unzip_python_library(path: &Path) {
     //       let asset_python_zip = include_bytes!(r"asset\python-3.8.2-embed-amd64-packaged.zip");
 
     let reader = std::io::Cursor::new(ASSET_PYTHON_ZIP);
-    let mut zip = zip::ZipArchive::new(reader).unwrap();
+    let mut zip = zip::ZipArchive::new(reader)?;
     for i in 0..zip.len() {
-        let mut file = zip.by_index(i).unwrap();
+        let mut file = zip.by_index(i)?;
         // TODO: passing as reference or not? don't understand very well...
         //       This function take a path who must be a subtype of AsRef<Path>
         let out_path = path.join(&file.sanitized_name());
         // TODO: why &*
         if (&*file.name()).ends_with('/') {
-            create_dir_all(&out_path).unwrap();
+            create_dir_all(&out_path)?;
         } else {
             if let Some(p) = out_path.parent() {
                 if !p.exists() {
-                    create_dir_all(&p).unwrap();
+                    create_dir_all(&p)?;
                 }
             }
-            let mut out_file = File::create(&out_path).unwrap();
-            copy(&mut file, &mut out_file).unwrap();
+            let mut out_file = File::create(&out_path)?;
+            copy(&mut file, &mut out_file)?;
         }
     }
+    Ok(())
 }
