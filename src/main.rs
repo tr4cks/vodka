@@ -7,9 +7,7 @@ use system::Process;
 
 fn main() -> anyhow::Result<()> {
     let dir = tempdir()?;
-    // TODO: I think I can do it better -> <P: AsRef<Path>>
-    asset::unzip_python_library(dir.as_ref())?;
-
+    asset::unzip_python_library(&dir)?;
     let process = Process::current()?;
     println!("Filename: {}", process.filename()?);
     for module in process.modules()? {
