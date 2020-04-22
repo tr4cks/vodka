@@ -13,4 +13,4 @@ tempfile = "3"
 zip = "0.5"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["errhandlingapi", "handleapi", "libloaderapi", "minwindef", "processthreadsapi", "psapi", "winbase", "winnt"]}
+winapi = { version = "0.3", features = ["basetsd", "errhandlingapi", "handleapi", "libloaderapi", "memoryapi", "minwindef", "processthreadsapi", "psapi", "synchapi", "winbase", "winnt"]}

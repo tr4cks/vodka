@@ -4,17 +4,28 @@ use std::error::Error;
 use std::ffi::{CString, NulError, OsString};
 use std::mem::{size_of, MaybeUninit};
 use std::os::windows::ffi::OsStringExt;
+use std::time::Duration;
 use std::{fmt, ptr};
 
-use winapi::shared::minwindef::{BOOL, DWORD, FARPROC, HMODULE, MAX_PATH};
+use winapi::shared::basetsd::SIZE_T;
+use winapi::shared::minwindef::{
+    BOOL, DWORD, FARPROC, HMODULE, LPCVOID, LPDWORD, LPVOID, MAX_PATH,
+};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::libloaderapi::GetProcAddress;
-use winapi::um::processthreadsapi::{GetCurrentProcessId, OpenProcess};
+use winapi::um::memoryapi::{ReadProcessMemory, VirtualAllocEx, WriteProcessMemory};
+use winapi::um::minwinbase::{LPSECURITY_ATTRIBUTES, LPTHREAD_START_ROUTINE};
+use winapi::um::processthreadsapi::{
+    CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, OpenProcess,
+};
 use winapi::um::psapi::{
     EnumProcessModulesEx, GetModuleFileNameExW, GetModuleInformation, MODULEINFO,
 };
-use winapi::um::winbase::{FormatMessageW, QueryFullProcessImageNameW, FORMAT_MESSAGE_FROM_SYSTEM};
+use winapi::um::synchapi::WaitForSingleObject;
+use winapi::um::winbase::{
+    FormatMessageW, QueryFullProcessImageNameW, FORMAT_MESSAGE_FROM_SYSTEM, WAIT_FAILED,
+};
 use winapi::um::winnt::{HANDLE, WCHAR};
 
 #[derive(Debug)]
@@ -247,5 +258,109 @@ pub fn get_proc_address(h_module: HMODULE, lp_proc_name: &str) -> Result<FARPROC
         Err(Win32Error::SystemError(SystemError::from_last_error()))
     } else {
         Ok(address)
+    }
+}
+
+#[inline(always)]
+pub fn create_remote_thread(
+    h_process: HANDLE,
+    lp_thread_attributes: LPSECURITY_ATTRIBUTES,
+    dw_stack_size: SIZE_T,
+    lp_start_address: LPTHREAD_START_ROUTINE,
+    lp_parameter: LPVOID,
+    dw_creation_flags: DWORD,
+    lp_thread_id: LPDWORD,
+) -> Result<HANDLE, Win32Error> {
+    match unsafe {
+        CreateRemoteThread(
+            h_process,
+            lp_thread_attributes,
+            dw_stack_size,
+            lp_start_address,
+            lp_parameter,
+            dw_creation_flags,
+            lp_thread_id,
+        )
+    } {
+        handle if handle.is_null() => Err(Win32Error::SystemError(SystemError::from_last_error())),
+        handle => Ok(handle),
+    }
+}
+
+#[inline(always)]
+pub fn virtual_alloc(
+    h_process: HANDLE,
+    lp_address: LPVOID,
+    dw_size: SIZE_T,
+    fl_allocation_type: DWORD,
+    fl_protect: DWORD,
+) -> Result<LPVOID, Win32Error> {
+    match unsafe {
+        VirtualAllocEx(
+            h_process,
+            lp_address,
+            dw_size,
+            fl_allocation_type,
+            fl_protect,
+        )
+    } {
+        handle if handle.is_null() => Err(Win32Error::SystemError(SystemError::from_last_error())),
+        handle => Ok(handle),
+    }
+}
+
+pub fn write_process_memory(
+    h_process: HANDLE,
+    lp_base_address: LPVOID,
+    lp_buffer: &[u8],
+) -> Result<SIZE_T, Win32Error> {
+    let mut bytes_written: SIZE_T = unsafe { MaybeUninit::uninit().assume_init() };
+    match unsafe {
+        WriteProcessMemory(
+            h_process,
+            lp_base_address,
+            lp_buffer.as_ptr() as LPCVOID,
+            lp_buffer.len(),
+            &mut bytes_written,
+        )
+    } {
+        0 => Err(Win32Error::SystemError(SystemError::from_last_error())),
+        _ => Ok(bytes_written),
+    }
+}
+
+pub fn read_process_memory(
+    h_process: HANDLE,
+    lp_base_address: LPCVOID,
+    lp_buffer: &mut [u8],
+) -> Result<SIZE_T, Win32Error> {
+    let mut bytes_read: SIZE_T = unsafe { MaybeUninit::uninit().assume_init() };
+    match unsafe {
+        ReadProcessMemory(
+            h_process,
+            lp_base_address,
+            lp_buffer.as_mut_ptr() as LPVOID,
+            lp_buffer.len(),
+            &mut bytes_read,
+        )
+    } {
+        0 => Err(Win32Error::SystemError(SystemError::from_last_error())),
+        _ => Ok(bytes_read),
+    }
+}
+
+#[inline(always)]
+pub fn wait_for_single_object(h_handle: HANDLE, duration: &Duration) -> Result<DWORD, Win32Error> {
+    match unsafe { WaitForSingleObject(h_handle, duration.as_millis().try_into().unwrap()) } {
+        WAIT_FAILED => Err(Win32Error::SystemError(SystemError::from_last_error())),
+        code => Ok(code),
+    }
+}
+
+pub fn get_exit_code_thread(h_thread: HANDLE) -> Result<DWORD, Win32Error> {
+    let mut exit_code: DWORD = unsafe { MaybeUninit::uninit().assume_init() };
+    match unsafe { GetExitCodeThread(h_thread, &mut exit_code) } {
+        0 => Err(Win32Error::SystemError(SystemError::from_last_error())),
+        _ => Ok(exit_code),
     }
 }
