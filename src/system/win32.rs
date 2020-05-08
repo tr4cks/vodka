@@ -8,14 +8,12 @@ use std::time::Duration;
 use std::{fmt, ptr};
 
 use winapi::shared::basetsd::SIZE_T;
-use winapi::shared::minwindef::{
-    BOOL, DWORD, FARPROC, HMODULE, LPCVOID, LPDWORD, LPVOID, MAX_PATH,
-};
+use winapi::shared::minwindef::{BOOL, DWORD, FARPROC, HMODULE, LPCVOID, LPVOID, MAX_PATH};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::libloaderapi::GetProcAddress;
 use winapi::um::memoryapi::{ReadProcessMemory, VirtualAllocEx, WriteProcessMemory};
-use winapi::um::minwinbase::{LPSECURITY_ATTRIBUTES, LPTHREAD_START_ROUTINE};
+use winapi::um::minwinbase::{LPSECURITY_ATTRIBUTES, LPTHREAD_START_ROUTINE, SECURITY_ATTRIBUTES};
 use winapi::um::processthreadsapi::{
     CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, OpenProcess,
 };
@@ -26,7 +24,7 @@ use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::{
     FormatMessageW, QueryFullProcessImageNameW, FORMAT_MESSAGE_FROM_SYSTEM, WAIT_FAILED,
 };
-use winapi::um::winnt::{HANDLE, WCHAR};
+use winapi::um::winnt::{HANDLE, LPWSTR, WCHAR};
 
 #[derive(Debug)]
 pub enum Win32Error {
@@ -108,8 +106,7 @@ impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = self
             .message
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or("Couldn't format error message");
         write!(f, "Error code {}: {}", self.code, message)
     }
@@ -144,15 +141,15 @@ pub fn get_current_process_id() -> DWORD {
 
 pub fn query_full_process_image_name(h_process: HANDLE) -> Result<String, Win32Error> {
     // Unicode(UTF-16) - LPWSTR
-    let mut filename: [WCHAR; MAX_PATH * 2 /* unicode */] = unsafe {
-        MaybeUninit::uninit().assume_init()
+    let mut filename = MaybeUninit::<[WCHAR; MAX_PATH * 2 /* unicode */]>::uninit();
+    let mut length: DWORD = (MAX_PATH * 2).try_into().unwrap();
+    let return_value = unsafe {
+        QueryFullProcessImageNameW(h_process, 0, filename.as_mut_ptr() as LPWSTR, &mut length)
     };
-    let mut length: DWORD = filename.len().try_into().unwrap();
-    let return_value =
-        unsafe { QueryFullProcessImageNameW(h_process, 0, filename.as_mut_ptr(), &mut length) };
     if return_value == 0 {
         return Err(Win32Error::SystemError(SystemError::from_last_error()));
     }
+    let filename = unsafe { filename.get_mut() };
     // From UTF-16 to UTF-8
     OsString::from_wide(&filename[..length as usize])
         .into_string()
@@ -164,7 +161,7 @@ pub fn enum_process_modules(
     dw_filter_flag: DWORD,
 ) -> Result<impl Iterator<Item = HMODULE>, Win32Error> {
     let mut module_handles = Vec::<HMODULE>::new();
-    let mut needed_capacity: DWORD = unsafe { MaybeUninit::uninit().assume_init() };
+    let mut needed_capacity = MaybeUninit::<DWORD>::uninit();
     let return_value = unsafe {
         // Do not call CloseHandle on any of the handles returned by this function
         EnumProcessModulesEx(
@@ -173,14 +170,16 @@ pub fn enum_process_modules(
             (module_handles.capacity() * size_of::<HMODULE>())
                 .try_into()
                 .unwrap(),
-            &mut needed_capacity,
+            needed_capacity.as_mut_ptr(),
             dw_filter_flag,
         )
     };
     if return_value == 0 {
         return Err(Win32Error::SystemError(SystemError::from_last_error()));
     }
+    let needed_capacity = unsafe { needed_capacity.assume_init() };
     module_handles.reserve_exact(needed_capacity as usize / size_of::<HMODULE>());
+    let mut needed_capacity = MaybeUninit::<DWORD>::uninit();
     let return_value = unsafe {
         EnumProcessModulesEx(
             h_process,
@@ -188,13 +187,14 @@ pub fn enum_process_modules(
             (module_handles.capacity() * size_of::<HMODULE>())
                 .try_into()
                 .unwrap(),
-            &mut needed_capacity,
+            needed_capacity.as_mut_ptr(),
             dw_filter_flag,
         )
     };
     if return_value == 0 {
         return Err(Win32Error::SystemError(SystemError::from_last_error()));
     }
+    let needed_capacity = unsafe { needed_capacity.assume_init() };
     unsafe {
         module_handles.set_len(min(
             needed_capacity as usize / size_of::<HMODULE>(),
@@ -206,20 +206,19 @@ pub fn enum_process_modules(
 
 pub fn get_module_file_name(h_process: HANDLE, h_module: HMODULE) -> Result<String, Win32Error> {
     // Unicode(UTF-16) - LPWSTR
-    let mut filename: [WCHAR; MAX_PATH * 2 /* unicode */] = unsafe {
-        MaybeUninit::uninit().assume_init()
-    };
+    let mut filename = MaybeUninit::<[WCHAR; MAX_PATH * 2 /* unicode */]>::uninit();
     let length = unsafe {
         GetModuleFileNameExW(
             h_process,
             h_module,
-            filename.as_mut_ptr(),
-            filename.len().try_into().unwrap(),
+            filename.as_mut_ptr() as LPWSTR,
+            (MAX_PATH * 2).try_into().unwrap(),
         )
     };
     if length == 0 {
         return Err(Win32Error::SystemError(SystemError::from_last_error()));
     }
+    let filename = unsafe { filename.get_mut() };
     // From UTF-16 to UTF-8
     OsString::from_wide(&filename[..length as usize])
         .into_string()
@@ -230,19 +229,19 @@ pub fn get_module_information(
     h_process: HANDLE,
     h_module: HMODULE,
 ) -> Result<MODULEINFO, Win32Error> {
-    let mut mod_info: MODULEINFO = unsafe { MaybeUninit::uninit().assume_init() };
+    let mut mod_info = MaybeUninit::<MODULEINFO>::uninit();
     let return_value = unsafe {
         GetModuleInformation(
             h_process,
             h_module,
-            &mut mod_info,
+            mod_info.as_mut_ptr(),
             size_of::<MODULEINFO>().try_into().unwrap(),
         )
     };
     if return_value == 0 {
         return Err(Win32Error::SystemError(SystemError::from_last_error()));
     }
-    Ok(mod_info)
+    Ok(unsafe { mod_info.assume_init() })
 }
 
 pub fn get_proc_address(h_module: HMODULE, lp_proc_name: &str) -> Result<FARPROC, Win32Error> {
@@ -264,13 +263,16 @@ pub fn get_proc_address(h_module: HMODULE, lp_proc_name: &str) -> Result<FARPROC
 #[inline(always)]
 pub fn create_remote_thread(
     h_process: HANDLE,
-    lp_thread_attributes: LPSECURITY_ATTRIBUTES,
+    mut lp_thread_attributes: Option<SECURITY_ATTRIBUTES>,
     dw_stack_size: SIZE_T,
     lp_start_address: LPTHREAD_START_ROUTINE,
     lp_parameter: LPVOID,
     dw_creation_flags: DWORD,
-    lp_thread_id: LPDWORD,
-) -> Result<HANDLE, Win32Error> {
+) -> Result<(DWORD, HANDLE), Win32Error> {
+    let lp_thread_attributes = lp_thread_attributes
+        .as_mut()
+        .map_or(ptr::null_mut(), |attrs| attrs as LPSECURITY_ATTRIBUTES);
+    let mut thread_id = MaybeUninit::<DWORD>::uninit();
     match unsafe {
         CreateRemoteThread(
             h_process,
@@ -279,11 +281,11 @@ pub fn create_remote_thread(
             lp_start_address,
             lp_parameter,
             dw_creation_flags,
-            lp_thread_id,
+            thread_id.as_mut_ptr(),
         )
     } {
         handle if handle.is_null() => Err(Win32Error::SystemError(SystemError::from_last_error())),
-        handle => Ok(handle),
+        handle => Ok((unsafe { thread_id.assume_init() }, handle)),
     }
 }
 
@@ -304,8 +306,10 @@ pub fn virtual_alloc(
             fl_protect,
         )
     } {
-        handle if handle.is_null() => Err(Win32Error::SystemError(SystemError::from_last_error())),
-        handle => Ok(handle),
+        address if address.is_null() => {
+            Err(Win32Error::SystemError(SystemError::from_last_error()))
+        }
+        address => Ok(address),
     }
 }
 
@@ -314,18 +318,18 @@ pub fn write_process_memory(
     lp_base_address: LPVOID,
     lp_buffer: &[u8],
 ) -> Result<SIZE_T, Win32Error> {
-    let mut bytes_written: SIZE_T = unsafe { MaybeUninit::uninit().assume_init() };
+    let mut bytes_written = MaybeUninit::<SIZE_T>::uninit();
     match unsafe {
         WriteProcessMemory(
             h_process,
             lp_base_address,
             lp_buffer.as_ptr() as LPCVOID,
             lp_buffer.len(),
-            &mut bytes_written,
+            bytes_written.as_mut_ptr(),
         )
     } {
         0 => Err(Win32Error::SystemError(SystemError::from_last_error())),
-        _ => Ok(bytes_written),
+        _ => Ok(unsafe { bytes_written.assume_init() }),
     }
 }
 
@@ -334,23 +338,23 @@ pub fn read_process_memory(
     lp_base_address: LPCVOID,
     lp_buffer: &mut [u8],
 ) -> Result<SIZE_T, Win32Error> {
-    let mut bytes_read: SIZE_T = unsafe { MaybeUninit::uninit().assume_init() };
+    let mut bytes_read = MaybeUninit::<SIZE_T>::uninit();
     match unsafe {
         ReadProcessMemory(
             h_process,
             lp_base_address,
             lp_buffer.as_mut_ptr() as LPVOID,
             lp_buffer.len(),
-            &mut bytes_read,
+            bytes_read.as_mut_ptr(),
         )
     } {
         0 => Err(Win32Error::SystemError(SystemError::from_last_error())),
-        _ => Ok(bytes_read),
+        _ => Ok(unsafe { bytes_read.assume_init() }),
     }
 }
 
 #[inline(always)]
-pub fn wait_for_single_object(h_handle: HANDLE, duration: &Duration) -> Result<DWORD, Win32Error> {
+pub fn wait_for_single_object(h_handle: HANDLE, duration: Duration) -> Result<DWORD, Win32Error> {
     match unsafe { WaitForSingleObject(h_handle, duration.as_millis().try_into().unwrap()) } {
         WAIT_FAILED => Err(Win32Error::SystemError(SystemError::from_last_error())),
         code => Ok(code),
@@ -358,9 +362,9 @@ pub fn wait_for_single_object(h_handle: HANDLE, duration: &Duration) -> Result<D
 }
 
 pub fn get_exit_code_thread(h_thread: HANDLE) -> Result<DWORD, Win32Error> {
-    let mut exit_code: DWORD = unsafe { MaybeUninit::uninit().assume_init() };
-    match unsafe { GetExitCodeThread(h_thread, &mut exit_code) } {
+    let mut exit_code = MaybeUninit::<DWORD>::uninit();
+    match unsafe { GetExitCodeThread(h_thread, exit_code.as_mut_ptr()) } {
         0 => Err(Win32Error::SystemError(SystemError::from_last_error())),
-        _ => Ok(exit_code),
+        _ => Ok(unsafe { exit_code.assume_init() }),
     }
 }

@@ -1,6 +1,13 @@
+use std::convert::TryInto;
+
 use iced_x86::{
     BlockEncoder, BlockEncoderOptions, Code, Instruction, InstructionBlock, MemoryOperand, Register,
 };
+use winapi::shared::minwindef::{BOOL, HMODULE};
+use winapi::um::winnt::LPCSTR;
+
+pub type LoadLibraryA = unsafe extern "system" fn(lp_lib_file_name: LPCSTR) -> HMODULE;
+pub type SetDllDirectoryA = unsafe extern "system" fn(lp_path_name: LPCSTR) -> BOOL;
 
 fn label(id: u64, mut instruction: Instruction) -> Instruction {
     instruction.set_ip(id);
@@ -28,8 +35,8 @@ fn label(id: u64, mut instruction: Instruction) -> Instruction {
 /// ```
 #[rustfmt::skip]
 fn preloader_instructions(
-    set_dll_directory_fn: u64, set_dll_directory_arg: u64,
-    load_library_fn: u64, load_library_arg: u64,
+    set_dll_directory_fn: SetDllDirectoryA, set_dll_directory_arg: u64,
+    load_library_fn: LoadLibraryA, load_library_arg: u64,
 ) -> Vec<Instruction> {
     enum Label {
         SetDllDirectoryOk = 1,
@@ -48,7 +55,7 @@ fn preloader_instructions(
             Code::Mov_r64_imm64, Register::RCX, set_dll_directory_arg
         ),
         Instruction::with_reg_u64(
-            Code::Mov_r64_imm64, Register::RAX, set_dll_directory_fn
+            Code::Mov_r64_imm64, Register::RAX, (set_dll_directory_fn as usize).try_into().unwrap()
         ),
         Instruction::with_reg(
             Code::Call_rm64, Register::RAX
@@ -69,7 +76,7 @@ fn preloader_instructions(
             Code::Mov_r64_imm64, Register::RCX, load_library_arg
         )),
         Instruction::with_reg_u64(
-            Code::Mov_r64_imm64, Register::RAX, load_library_fn
+            Code::Mov_r64_imm64, Register::RAX, (load_library_fn as usize).try_into().unwrap()
         ),
         Instruction::with_reg(
             Code::Call_rm64, Register::RAX
@@ -99,9 +106,9 @@ fn preloader_instructions(
 }
 
 pub fn preloader_bytecode(
-    set_dll_directory_fn: u64,
+    set_dll_directory_fn: SetDllDirectoryA,
     set_dll_directory_arg: u64,
-    load_library_fn: u64,
+    load_library_fn: LoadLibraryA,
     load_library_arg: u64,
 ) -> anyhow::Result<Vec<u8>> {
     let instructions = preloader_instructions(
