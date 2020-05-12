@@ -80,7 +80,7 @@ impl Process {
 
     pub fn memory_stream(
         &'_ self,
-        memory_region: MemoryRegion,
+        memory_region: &MemoryRegion,
     ) -> anyhow::Result<MemoryStream<'_>> {
         MemoryStream::new(self, memory_region.start_address, memory_region.size)
     }

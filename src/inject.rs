@@ -1,13 +1,26 @@
 use std::convert::TryInto;
+use std::ffi::{OsStr, OsString};
+use std::io::{BufWriter, Write};
+use std::mem::transmute;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::Path;
+use std::time::Duration;
 
 use iced_x86::{
     BlockEncoder, BlockEncoderOptions, Code, Instruction, InstructionBlock, MemoryOperand, Register,
 };
-use winapi::shared::minwindef::{BOOL, HMODULE};
-use winapi::um::winnt::LPCSTR;
+use winapi::ctypes::c_void;
+use winapi::shared::minwindef::{BOOL, FARPROC, HMODULE, LPVOID};
+use winapi::um::minwinbase::LPTHREAD_START_ROUTINE;
+use winapi::um::winnt::{
+    LPCSTR, LPCWSTR, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READONLY, PAGE_READWRITE,
+    WCHAR,
+};
 
-pub type LoadLibraryA = unsafe extern "system" fn(lp_lib_file_name: LPCSTR) -> HMODULE;
-pub type SetDllDirectoryA = unsafe extern "system" fn(lp_path_name: LPCSTR) -> BOOL;
+use crate::system::{Module, ModuleIteratorExt, Process};
+
+pub type LoadLibraryW = unsafe extern "system" fn(lp_lib_file_name: LPCWSTR) -> HMODULE;
+pub type SetDllDirectoryW = unsafe extern "system" fn(lp_path_name: LPCWSTR) -> BOOL;
 
 fn label(id: u64, mut instruction: Instruction) -> Instruction {
     instruction.set_ip(id);
@@ -20,14 +33,14 @@ fn label(id: u64, mut instruction: Instruction) -> Instruction {
 /// ```
 /// #include <Windows.h>
 ///
-/// typedef BOOL    (__stdcall *SetDllDirectoryA_repr)(LPCSTR lpPathName);
-/// typedef HMODULE (__stdcall *LoadLibraryA_repr)(LPCSTR lpLibFileName);
+/// typedef BOOL    (__stdcall *SetDllDirectoryW_repr)(LPCWSTR lpPathName);
+/// typedef HMODULE (__stdcall *LoadLibraryW_repr)(LPCWSTR lpLibFileName);
 ///
 /// DWORD __stdcall thread_start_routine(LPVOID lpThreadParameter) {
-///     if (((SetDllDirectoryA_repr) ${set_dll_directory_fn})(${set_dll_directory_arg}) == 0) {
+///     if (((SetDllDirectoryW_repr) ${set_dll_directory_fn})(${set_dll_directory_arg}) == 0) {
 ///         return 1;
 ///     }
-///     if (((LoadLibraryA_repr) ${load_library_fn})(${load_library_arg}) == NULL) {
+///     if (((LoadLibraryW_repr) ${load_library_fn})(${load_library_arg}) == NULL) {
 ///         return 2;
 ///     }
 ///     return 0;
@@ -35,8 +48,8 @@ fn label(id: u64, mut instruction: Instruction) -> Instruction {
 /// ```
 #[rustfmt::skip]
 fn preloader_instructions(
-    set_dll_directory_fn: SetDllDirectoryA, set_dll_directory_arg: u64,
-    load_library_fn: LoadLibraryA, load_library_arg: u64,
+    set_dll_directory_fn: SetDllDirectoryW, set_dll_directory_arg: u64, // TODO: use LPCWSTR in place?
+    load_library_fn: LoadLibraryW, load_library_arg: u64,
 ) -> Vec<Instruction> {
     enum Label {
         SetDllDirectoryOk = 1,
@@ -105,10 +118,10 @@ fn preloader_instructions(
     ]
 }
 
-pub fn preloader_bytecode(
-    set_dll_directory_fn: SetDllDirectoryA,
+fn preloader_bytecode(
+    set_dll_directory_fn: SetDllDirectoryW,
     set_dll_directory_arg: u64,
-    load_library_fn: LoadLibraryA,
+    load_library_fn: LoadLibraryW,
     load_library_arg: u64,
 ) -> anyhow::Result<Vec<u8>> {
     let instructions = preloader_instructions(
@@ -121,4 +134,103 @@ pub fn preloader_bytecode(
     Ok(BlockEncoder::encode(64, block, BlockEncoderOptions::NONE)
         .map_err(anyhow::Error::msg)?
         .code_buffer)
+}
+
+pub fn inject_dll_into_process(
+    process: &Process,
+    search_path: Option<impl AsRef<Path>>,
+    dll_path: impl AsRef<Path>,
+) -> anyhow::Result<()> {
+    let modules: Vec<Module> = process.modules()?.collect();
+    let mut modules = modules.iter();
+    let kernel32 = modules.try_find_module("KERNEL32.DLL")?.ok_or_else(|| {
+        anyhow::anyhow!("Couldn't find the KERNEL32.DLL library in the targeted process")
+    })?;
+
+    let set_dll_directory_addr = kernel32.proc_address("SetDllDirectoryW")?;
+    let set_dll_directory_fn =
+        unsafe { transmute::<FARPROC, SetDllDirectoryW>(set_dll_directory_addr) };
+    let load_library_addr = kernel32.proc_address("LoadLibraryW")?;
+    let load_library_fn = unsafe { transmute::<FARPROC, LoadLibraryW>(load_library_addr) };
+
+    let search_path: Option<Vec<u16>> = search_path.map(|p| {
+        p.as_ref()
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    });
+    let search_path = match search_path {
+        Some(p) => unsafe {
+            Some(std::slice::from_raw_parts(
+                p.as_ptr() as *const u8,
+                p.len() * 2,
+            ))
+        },
+        None => None,
+    };
+    let search_path_len = search_path.map_or(0, |p| p.len());
+
+    let dll_path: Vec<u16> = dll_path
+        .as_ref()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let dll_path =
+        unsafe { std::slice::from_raw_parts(dll_path.as_ptr() as *const u8, dll_path.len() * 2) };
+
+    let region = process.virtual_alloc(
+        std::ptr::null_mut::<c_void>(),
+        search_path_len + dll_path.len(),
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE,
+    )?;
+    let stream = process.memory_stream(&region)?;
+    let mut buf_writer = BufWriter::new(stream);
+    if let Some(buffer) = search_path {
+        buf_writer.write_all(buffer)?;
+    }
+    buf_writer.write_all(dll_path)?;
+    buf_writer.flush()?;
+
+    let search_path_addr = search_path.map_or(std::ptr::null::<WCHAR>(), |p| {
+        region.start_address() as LPCWSTR
+    });
+    let dll_path_addr = (region.start_address() + search_path_len) as LPCWSTR;
+
+    let bytecode = preloader_bytecode(
+        set_dll_directory_fn,
+        search_path_addr as u64,
+        load_library_fn,
+        dll_path_addr as u64,
+    )?;
+    let region = process.virtual_alloc(
+        std::ptr::null_mut::<c_void>(),
+        bytecode.len(),
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READ,
+    )?;
+    let mut stream = process.memory_stream(&region)?;
+    stream.write_all(&bytecode)?;
+    stream.flush()?;
+
+    let start_routine_fn =
+        unsafe { transmute::<usize, LPTHREAD_START_ROUTINE>(region.start_address()) };
+    let thread =
+        process.create_thread(None, 0, start_routine_fn, std::ptr::null_mut::<c_void>(), 0)?;
+    thread.wait(Duration::from_secs(10))?;
+    thread.exit_code().map_or_else(
+        |e| Err(anyhow::Error::new(e)),
+        |code| {
+            if code != 0 {
+                Err(anyhow::anyhow!(
+                    "thread terminated with error code {}",
+                    code
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
 }
