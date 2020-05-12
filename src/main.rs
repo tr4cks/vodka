@@ -17,6 +17,6 @@ fn main() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let bundle = unzip_python_library(&dir)?;
     let process = Process::current(PROCESS_ALL_ACCESS)?;
-    inject::inject_dll_into_process(&process, Option::<&Path>::None, bundle.library)?;
+    inject_dll_into_process(&process, Option::<&Path>::None, bundle.library)?;
     Ok(())
 }

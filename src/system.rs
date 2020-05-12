@@ -121,14 +121,19 @@ pub trait ModuleIteratorExt<'a, 'p: 'a>: Iterator<Item = &'a Module<'p>> {
                 None => return Ok(None),
             };
             if filename == name {
-                return Ok(Some(module))
+                return Ok(Some(module));
             }
         }
         Ok(None)
     }
 }
 
-impl<'a, 'p, T> ModuleIteratorExt<'a, 'p> for T where 'p: 'a, T: Iterator<Item = &'a Module<'p>> {}
+impl<'a, 'p, T> ModuleIteratorExt<'a, 'p> for T
+where
+    'p: 'a,
+    T: Iterator<Item = &'a Module<'p>>,
+{
+}
 
 pub struct Thread {
     thread_id: DWORD,

@@ -1,8 +1,7 @@
 use std::convert::TryInto;
-use std::ffi::{OsStr, OsString};
 use std::io::{BufWriter, Write};
 use std::mem::transmute;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,11 +9,10 @@ use iced_x86::{
     BlockEncoder, BlockEncoderOptions, Code, Instruction, InstructionBlock, MemoryOperand, Register,
 };
 use winapi::ctypes::c_void;
-use winapi::shared::minwindef::{BOOL, FARPROC, HMODULE, LPVOID};
+use winapi::shared::minwindef::{BOOL, FARPROC, HMODULE};
 use winapi::um::minwinbase::LPTHREAD_START_ROUTINE;
 use winapi::um::winnt::{
-    LPCSTR, LPCWSTR, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READONLY, PAGE_READWRITE,
-    WCHAR,
+    LPCWSTR, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, WCHAR,
 };
 
 use crate::system::{Module, ModuleIteratorExt, Process};
@@ -194,7 +192,7 @@ pub fn inject_dll_into_process(
     buf_writer.write_all(dll_path)?;
     buf_writer.flush()?;
 
-    let search_path_addr = search_path.map_or(std::ptr::null::<WCHAR>(), |p| {
+    let search_path_addr = search_path.map_or(std::ptr::null::<WCHAR>(), |_| {
         region.start_address() as LPCWSTR
     });
     let dll_path_addr = (region.start_address() + search_path_len) as LPCWSTR;
